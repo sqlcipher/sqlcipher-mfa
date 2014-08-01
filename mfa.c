@@ -8,6 +8,23 @@
 #include <ykpers.h>
 #include <ykdef.h>
 
+#include <daplug/DaplugDongle.h>
+
+#include <openssl/hmac.h>
+
+static char *hmac_key =    "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+static unsigned char hmac_tmp1[1024];
+static char hmac_tmp2[1024];
+
+static void test_hmac(unsigned char *hmac_key, int key_sz, unsigned char *in, int in_sz, unsigned char *out) {
+  HMAC_CTX hctx;
+  unsigned int outlen;
+  HMAC_CTX_init(&hctx);
+  HMAC_Init_ex(&hctx, hmac_key, key_sz, EVP_sha1(), NULL);
+  HMAC_Update(&hctx, in, in_sz);
+  HMAC_Final(&hctx, out, &outlen);
+  HMAC_CTX_cleanup(&hctx);
+}
 
 static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned char *out){
   YK_KEY *yk;
@@ -25,6 +42,8 @@ static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned c
   unsigned char buffer[20];
   unsigned char response[64];
   int i = 0;
+  char challenge[MAX_REAL_DATA_SIZE*2+1],
+       ret[MAX_REAL_DATA_SIZE*2+1];
 
   versionMajor = versionMinor = versionBuild = 0;
   yk_errno = 0;
@@ -50,13 +69,18 @@ static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned c
       int block_sz;
       data = in + offset;
       block_sz = (hmac_bytes < in_sz - offset) ? hmac_bytes : in_sz - offset;
-      memset(buffer, 0, hmac_bytes);
+      memset(buffer, 1, hmac_bytes);
       memcpy(buffer, data, block_sz);
+      memset(challenge, 0, MAX_REAL_DATA_SIZE*2+1);
+      memset(ret, 0, MAX_REAL_DATA_SIZE*2+1);
 
-      fprintf(stderr, "iteration %d: challenge to yubikey in_sz=%d, offset=%d, block_sz=%d\n", i, in_sz, offset, block_sz);
+      cipher_bin2hex(buffer, hmac_bytes, challenge);
+
+      fprintf(stderr, "iteration %d: challenge to yubikey in_sz=%d, offset=%d, block_sz=%d, challenge=%s\n", i, in_sz, offset, block_sz, challenge);
 
       /* issue HMAC challenge */
-  	  if (!yk_write_to_key(yk, yk_cmd, buffer, block_sz)) {
+  	  if (!yk_write_to_key(yk, yk_cmd, buffer, hmac_bytes)) {
+  	  //if (!yk_write_to_key(yk, yk_cmd, buffer, 12)) {
         CODEC_TRACE(("Error writing HMAC challenge to Yubikey\n"));
         return SQLITE_ERROR;
       }
@@ -67,8 +91,17 @@ static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned c
         return SQLITE_ERROR;
       } else {
         /* HMAC responses are 160 bits */
-        fprintf(stderr, "received response from Yubikey: length %d\n", response_len);
-        memcpy(out + offset, response, block_sz); /* only copy first 20 bytes of response */
+        cipher_bin2hex(response, hmac_bytes, ret);
+        fprintf(stderr, "received response from Yubikey:  %s\n", ret);
+        memcpy(out + offset, response, block_sz); /* only copy a blocks worth of of response */
+
+        memset(hmac_tmp1, 0, 1024);
+        memset(hmac_tmp2, 0, 1024);
+        cipher_hex2bin(hmac_key, strlen(hmac_key), hmac_tmp1);
+        test_hmac(hmac_tmp1, strlen(hmac_key) / 2, buffer, hmac_bytes, response);
+        cipher_bin2hex(response, hmac_bytes, hmac_tmp2);
+        fprintf(stderr, "hmac verification (via openssl): %s\n", hmac_tmp2);
+
       }
       offset += block_sz;
     }
@@ -79,6 +112,64 @@ static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned c
 
   return SQLITE_OK;
 }
+
+static int diversify_daplug(void *ctx, unsigned char *in, int in_sz, unsigned char *out){
+	unsigned int response_len = 0;
+  unsigned char *data;
+  int offset;
+  unsigned int hmac_bytes = 20;
+	unsigned int expect_bytes = hmac_bytes;
+  unsigned char buffer[20];
+  unsigned char response[64];
+  int i = 0;
+  char challenge[MAX_REAL_DATA_SIZE*2+1],
+       ret[MAX_REAL_DATA_SIZE*2+1];
+  DaplugDongle *card;
+
+  char **donglesList = NULL;
+  int nbDongles = Daplug_getDonglesList(&donglesList);
+  
+  fprintf(stderr,"diversify_daplug()\n");
+  card = Daplug_getDongleById(0);
+
+  for(i = 0, offset = 0; offset < in_sz; i++) {
+    int block_sz;
+    data = in + offset;
+    block_sz = (hmac_bytes < in_sz - offset) ? hmac_bytes : in_sz - offset;
+    memset(buffer, 1, hmac_bytes);
+    memset(challenge, 0, MAX_REAL_DATA_SIZE*2+1);
+    memset(ret, 0, MAX_REAL_DATA_SIZE*2+1);
+    memcpy(buffer, data, block_sz);
+
+    cipher_bin2hex(buffer, hmac_bytes, challenge);
+
+    fprintf(stderr, "iteration %d: challenge to daplug in_sz=%d, offset=%d, block_sz=%d challenge=%s\n", i, in_sz, offset, block_sz, challenge);
+
+    //if(!Daplug_hmac(card, 0x54 ,OTP_0_DIV,NULL,NULL,challenge,ret)) {
+    if(!Daplug_hmac(card,0x54,OTP_0_DIV,NULL,NULL,challenge,ret)) {
+      CODEC_TRACE(("Error writing HMAC challenge to daplug\n"));
+      return SQLITE_ERROR;
+    } else {
+      /* HMAC responses are 160 bits */
+      fprintf(stderr, "received response from daplug:   %s\n", ret);
+      cipher_hex2bin((const unsigned char*) ret, hmac_bytes * 2, response);
+      memcpy(out + offset, response, block_sz); /* only copy one blocks worth */
+
+      memset(hmac_tmp1, 0, 1024);
+      memset(hmac_tmp2, 0, 1024);
+      cipher_hex2bin(hmac_key, strlen(hmac_key), hmac_tmp1);
+      test_hmac(hmac_tmp1, strlen(hmac_key) / 2, buffer, hmac_bytes, response);
+      cipher_bin2hex(response, hmac_bytes, hmac_tmp2);
+      fprintf(stderr, "hmac verification (via openssl): %s\n", hmac_tmp2);
+
+    }
+    offset += block_sz;
+  }
+
+ Daplug_close(card);
+  return SQLITE_OK;
+}
+
 
 int main(int argc, char **argv) {
   sqlite3 *db;
@@ -93,9 +184,9 @@ int main(int argc, char **argv) {
 
   sqlcipher_register_provider(NULL);
   provider = sqlcipher_get_provider();
+  provider->diversify = diversify_daplug;
   provider->diversify = diversify_yubikey;
   sqlcipher_register_provider(provider);
-
 
   srand(0);
 
