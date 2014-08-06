@@ -10,22 +10,6 @@
 
 #include <daplug/DaplugDongle.h>
 
-#include <openssl/hmac.h>
-
-static char *hmac_key =    "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
-static unsigned char hmac_tmp1[1024];
-static char hmac_tmp2[1024];
-
-static void test_hmac(unsigned char *hmac_key, int key_sz, unsigned char *in, int in_sz, unsigned char *out) {
-  HMAC_CTX hctx;
-  unsigned int outlen;
-  HMAC_CTX_init(&hctx);
-  HMAC_Init_ex(&hctx, hmac_key, key_sz, EVP_sha1(), NULL);
-  HMAC_Update(&hctx, in, in_sz);
-  HMAC_Final(&hctx, out, &outlen);
-  HMAC_CTX_cleanup(&hctx);
-}
-
 static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned char *out){
   YK_KEY *yk;
   int versionMajor;
@@ -48,18 +32,18 @@ static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned c
   versionMajor = versionMinor = versionBuild = 0;
   yk_errno = 0;
 
-  fprintf(stderr,"diversify_yubikey()\n");
+  fprintf(stdout,"diversify_yubikey()\n");
 
   if (yk_init() && (yk = yk_open_first_key())) {
     if (!yk_get_status(yk, st)) {
-      CODEC_TRACE(("Unable to get status from Yubikey: error %d (%s)\n", yk_errno, yk_strerror(yk_errno)));
+      ERROR(("Unable to get status from Yubikey: error %d (%s)\n", yk_errno, yk_strerror(yk_errno)));
       return SQLITE_ERROR;
     } else {
       versionMajor = ykds_version_major(st);
       versionMinor = ykds_version_minor(st);
       versionBuild = ykds_version_build(st); 
       if (versionMajor < 2 || (versionMajor == 2 && versionMinor < 2)) {
-        CODEC_TRACE(("Incorrect firmware version: HMAC challenge-response not supported with YubiKey %d.%d.%d\n", 
+        ERROR(("Incorrect firmware version: HMAC challenge-response not supported with YubiKey %d.%d.%d\n", 
                         versionMajor, versionMinor, versionBuild));
         return SQLITE_ERROR;
       }
@@ -76,37 +60,29 @@ static int diversify_yubikey(void *ctx, unsigned char *in, int in_sz, unsigned c
 
       cipher_bin2hex(buffer, hmac_bytes, challenge);
 
-      fprintf(stderr, "iteration %d: challenge to yubikey in_sz=%d, offset=%d, block_sz=%d, challenge=%s\n", i, in_sz, offset, block_sz, challenge);
+      fprintf(stdout, "iteration %d: challenge to yubikey in_sz=%d, offset=%d, block_sz=%d, challenge=%s\n", i, in_sz, offset, block_sz, challenge);
 
       /* issue HMAC challenge */
   	  if (!yk_write_to_key(yk, yk_cmd, buffer, hmac_bytes)) {
   	  //if (!yk_write_to_key(yk, yk_cmd, buffer, 12)) {
-        CODEC_TRACE(("Error writing HMAC challenge to Yubikey\n"));
+        ERROR(("Error writing HMAC challenge to Yubikey\n"));
         return SQLITE_ERROR;
       }
       if (!yk_read_response_from_key(
             yk, slot, YK_FLAG_MAYBLOCK, // use selected slot and allow the yubikey to block for button press
             &response, sizeof(response), hmac_bytes, &response_len)) {
-        CODEC_TRACE(("error reading HMAC response from Yubikey: code %d (%s)\n", yk_errno, yk_strerror(yk_errno)));
+        ERROR(("error reading HMAC response from Yubikey: code %d (%s)\n", yk_errno, yk_strerror(yk_errno)));
         return SQLITE_ERROR;
       } else {
         /* HMAC responses are 160 bits */
         cipher_bin2hex(response, hmac_bytes, ret);
-        fprintf(stderr, "received response from Yubikey:  %s\n", ret);
+        fprintf(stdout, "received response from Yubikey:  %s\n", ret);
         memcpy(out + offset, response, block_sz); /* only copy a blocks worth of of response */
-
-        memset(hmac_tmp1, 0, 1024);
-        memset(hmac_tmp2, 0, 1024);
-        cipher_hex2bin(hmac_key, strlen(hmac_key), hmac_tmp1);
-        test_hmac(hmac_tmp1, strlen(hmac_key) / 2, buffer, hmac_bytes, response);
-        cipher_bin2hex(response, hmac_bytes, hmac_tmp2);
-        fprintf(stderr, "hmac verification (via openssl): %s\n", hmac_tmp2);
-
       }
       offset += block_sz;
     }
   } else {
-    CODEC_TRACE(("Unable to open Yubikey: code %d (%s)\n", yk_errno, yk_strerror(yk_errno)));
+    ERROR(("Unable to open Yubikey: code %d (%s)\n", yk_errno, yk_strerror(yk_errno)));
     return SQLITE_ERROR;
   }
 
@@ -129,7 +105,7 @@ static int diversify_daplug(void *ctx, unsigned char *in, int in_sz, unsigned ch
   char **donglesList = NULL;
   int nbDongles = Daplug_getDonglesList(&donglesList);
   
-  fprintf(stderr,"diversify_daplug()\n");
+  fprintf(stdout,"diversify_daplug()\n");
   card = Daplug_getDongleById(0);
 
   for(i = 0, offset = 0; offset < in_sz; i++) {
@@ -143,30 +119,19 @@ static int diversify_daplug(void *ctx, unsigned char *in, int in_sz, unsigned ch
 
     cipher_bin2hex(buffer, hmac_bytes, challenge);
 
-    fprintf(stderr, "iteration %d: challenge to daplug in_sz=%d, offset=%d, block_sz=%d challenge=%s\n", i, in_sz, offset, block_sz, challenge);
+    fprintf(stdout, "iteration %d: challenge to daplug in_sz=%d, offset=%d, block_sz=%d challenge=%s\n", i, in_sz, offset, block_sz, challenge);
 
-    //if(!Daplug_hmac(card, 0x54 ,OTP_0_DIV,NULL,NULL,challenge,ret)) {
     if(!Daplug_hmac(card,0x54,OTP_0_DIV,NULL,NULL,challenge,ret)) {
-      CODEC_TRACE(("Error writing HMAC challenge to daplug\n"));
+      ERROR(("Error writing HMAC challenge to daplug\n"));
       return SQLITE_ERROR;
     } else {
-      /* HMAC responses are 160 bits */
-      fprintf(stderr, "received response from daplug:   %s\n", ret);
       cipher_hex2bin((const unsigned char*) ret, hmac_bytes * 2, response);
       memcpy(out + offset, response, block_sz); /* only copy one blocks worth */
-
-      memset(hmac_tmp1, 0, 1024);
-      memset(hmac_tmp2, 0, 1024);
-      cipher_hex2bin(hmac_key, strlen(hmac_key), hmac_tmp1);
-      test_hmac(hmac_tmp1, strlen(hmac_key) / 2, buffer, hmac_bytes, response);
-      cipher_bin2hex(response, hmac_bytes, hmac_tmp2);
-      fprintf(stderr, "hmac verification (via openssl): %s\n", hmac_tmp2);
-
     }
     offset += block_sz;
   }
 
- Daplug_close(card);
+  Daplug_close(card);
   return SQLITE_OK;
 }
 
@@ -174,18 +139,38 @@ static int diversify_daplug(void *ctx, unsigned char *in, int in_sz, unsigned ch
 int main(int argc, char **argv) {
   sqlite3 *db;
   const char *file= "sqlcipher.db";
-
   char* key = (char *) "test123";
-
   unsigned long inserts = 0;
   unsigned long insert_rows = 30;
-  int rc;
+  int rc, i;
   sqlcipher_provider *provider;
+  int use_yubikey = -1;
 
+  if(argc < 2) {
+      fprintf(stderr, "specify -d or -y to use daplug or yuibkey respectively\n");
+      exit(1);
+  }
+
+  for (i = 1; i < argc; i++) {
+    if(strcmp(argv[i], "-y") == 0) {
+      use_yubikey = 1;
+    } else if (strcmp(argv[i], "-d") ==0) {
+      use_yubikey = 0;
+    } else {
+    }
+  }
+
+
+   
   sqlcipher_register_provider(NULL);
   provider = sqlcipher_get_provider();
-  provider->diversify = diversify_daplug;
-  provider->diversify = diversify_yubikey;
+
+  if(use_yubikey) {
+    provider->diversify = diversify_yubikey;
+  } else {
+    provider->diversify = diversify_daplug;
+  }
+
   sqlcipher_register_provider(provider);
 
   srand(0);

@@ -26,7 +26,6 @@ LDFLAGS = \
 
 CC = clang
 
-SRC = mfa.c 
 OTHER_SRC = \
 	$(DAPLUGDIR)/src/winusb.c \
 	$(DAPLUGDIR)/src/DaplugDongle.c \
@@ -40,10 +39,20 @@ OTHER_SRC = \
 	$(DAPLUGDIR)/src/utils.c 
 
 OBJS = ${SRC:.c=.o}
-TARGET = mfa
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(OTHER_SRC) $(SRC) -o $@
+MFA_SRC = mfa.c 
+MFA_TARGET = mfa
+
+DFLASH_SRC = daplug-flash.c 
+DFLASH_TARGET = daplug-flash
+
+all: $(MFA_TARGET) $(DFLASH_TARGET)
+
+$(MFA_TARGET): $(MFA_SRC)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(OTHER_SRC) $(MFA_SRC) -o $@
+
+$(DFLASH_TARGET): $(DFLASH_SRC)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(OTHER_SRC) $(DFLASH_SRC) -o $@
 
 clean:
-	rm -rf $(OBJS) *.dSYM *.db $(TARGET)
+	rm -rf $(OBJS) *.dSYM *.db $(MFA_TARGET) $(DFLASH_TARGET)
